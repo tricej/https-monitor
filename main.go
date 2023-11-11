@@ -3,44 +3,31 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/push"
 )
-
-var (
-	responseCodeCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_response_code",
-			Help: "HTTP response codes",
-		},
-		[]string{"address", "code"},
-	)
-	responseTimeHistogram = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_response_time",
-			Help:    "HTTP response time in milliseconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"address"},
-	)
-)
-
-func init() {
-	// Register Prometheus metrics
-	prometheus.MustRegister(responseCodeCounter)
-	prometheus.MustRegister(responseTimeHistogram)
-}
 
 type responseData struct {
-	address      string
-	responseCode int
-	responseTime time.Duration
+	address       string
+	responseCode  int
+	responseTime  time.Duration
+	responseError error
 }
 
 func checkResponse(address string) responseData {
+	dnsName := strings.Split(address, "www.")[1]
+	if _, err := net.LookupIP(dnsName); err != nil {
+		slog.Error("unable to resolve dns name", "URL", address)
+		return responseData{
+			address:       address,
+			responseCode:  0,
+			responseTime:  0,
+			responseError: err,
+		}
+	}
+
 	startTime := time.Now()
 
 	// Perform an HTTP GET request to the specified URL
@@ -49,53 +36,47 @@ func checkResponse(address string) responseData {
 	// Record the end time after the HTTP request is complete
 	endTime := time.Now()
 
+	// Calculate the response time
+	responseTime := endTime.Sub(startTime)
+
 	if err != nil {
 		// If there was an error connecting to the URL, log an error message
 		slog.Error("Unable to connect to endpoint", "URL", address, "Error", err)
 		return responseData{
-			address:      address,
-			responseCode: 0,
-			responseTime: 0,
+			address:       address,
+			responseCode:  0,
+			responseTime:  0,
+			responseError: err,
 		}
 	}
 
-	// Check if the HTTP response is not valid (e.g., status code other than 2xx)
-	if response != nil && (response.StatusCode < 200 || response.StatusCode >= 300) {
-		slog.Error("Unexpected HTTP response status", "URL", address, "StatusCode", response.StatusCode)
-	} else if response == nil {
-		slog.Error("Error: Empty HTTP response", "URL", address)
+	if response == nil {
+		slog.Error("empty http response", "url", address)
 		return responseData{
-			address:      address,
-			responseCode: 0,
-			responseTime: 0,
+			address:       address,
+			responseCode:  0,
+			responseTime:  0,
+			responseError: err,
 		}
 	}
-
-	// Calculate the response time
-	responseTime := endTime.Sub(startTime)
-
 	defer response.Body.Close()
 
-	// Increment Prometheus counters
-	responseCodeCounter.WithLabelValues(address, fmt.Sprint(response.StatusCode)).Inc()
-	responseTimeHistogram.WithLabelValues(address).Observe(float64(responseTime.Milliseconds()))
-
 	return responseData{
-		address:      address,
-		responseCode: response.StatusCode,
-		responseTime: time.Duration(responseTime),
+		address:       address,
+		responseCode:  response.StatusCode,
+		responseTime:  time.Duration(responseTime),
+		responseError: err,
 	}
 }
 
 func testLoop(testList []string, loopWaitTime time.Duration) {
 	for {
 		testResults := []responseData{}
-		fmt.Printf("Sleeping %v\n", loopWaitTime.String())
-		time.Sleep(loopWaitTime)
 
 		// Test each address and store the results
 		for _, address := range testList {
 			testResult := checkResponse(address)
+			// Append the result regardless of whether there is an error or not
 			testResults = append(testResults, testResult)
 		}
 
@@ -104,27 +85,22 @@ func testLoop(testList []string, loopWaitTime time.Duration) {
 			fmt.Printf("Address: %v\n", testResult.address)
 			fmt.Printf("Response Code: %v\n", testResult.responseCode)
 			fmt.Printf("Response Time: %vms\n", testResult.responseTime.Milliseconds())
+			if testResult.responseError != nil {
+				fmt.Printf("Reponse Error: %v\n", testResult.responseError.Error())
+			}
 		}
 
-		// Push metrics to Prometheus Pushgateway
-		err := push.New("http://your-pushgateway-url", "https-monitor-v2").
-			Collector(responseCodeCounter).
-			Collector(responseTimeHistogram).
-			Grouping("instance", "example").
-			Push()
-		if err != nil {
-			slog.Error("Error pushing metrics to Pushgateway", "Error", err)
-		}
+		fmt.Printf("Sleeping %v\n", loopWaitTime.String())
+		time.Sleep(loopWaitTime)
 	}
 }
-
 func main() {
 	// List of addresses to test
 	addressList := [5]string{
 		"https://www.google.com",
-		"https://go.dev",
-		"https://www.amazon.com",
-		"https://www.github123.com",
+		"https://www.cloudflare.com",
+		"https://www.amazonfdad.com",
+		"https://www.github.com",
 		"https://www.stackoverflow.com",
 	}
 
